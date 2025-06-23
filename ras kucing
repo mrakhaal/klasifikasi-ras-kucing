@@ -1,0 +1,180 @@
+# Import Libraries
+import numpy as np
+import random
+import matplotlib.pyplot as plt
+import plotly.graph_objects as go
+import cv2
+import os
+import itertools
+from imutils import paths
+from sklearn.utils import shuffle
+from sklearn.metrics import confusion_matrix, classification_report
+import tensorflow as tf
+from tensorflow.keras.applications import ResNet50
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.utils import to_categorical
+from tensorflow.keras.layers import Dense, Dropout, GlobalAveragePooling2D
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+import warnings
+warnings.filterwarnings("ignore")
+
+# Path Dataset
+training_path = r"C:/Users/mrakh/Downloads/Skripsi/training"
+validate_path = r"C:/Users/mrakh/Downloads/Skripsi/validasi"
+test_path = r"C:/Users/mrakh/Downloads/Skripsi/testing"
+
+# Path Dataset
+training_path = r"C:/Users/mrakh/Downloads/Skripsi/training"
+validate_path = r"C:/Users/mrakh/Downloads/Skripsi/validasi"
+test_path = r"C:/Users/mrakh/Downloads/Skripsi/testing"
+
+# Label Ras Kucing
+cat_breed_labels = {
+    "Russian Blue": 0,
+    "Sphynx - Hairless Cat": 1,
+    "Persian": 2,
+    "Munchkin": 3,
+    "Maine Coon": 4,
+    "Himalayan": 5,
+    "Domestic Long Hair": 6,
+    "British Shorthair": 7,
+    "Bengal": 8,
+    "American Shorthair": 9,
+    "Balinese": 10,
+    "American Bobtail": 11
+}
+
+# Fungsi Memuat Dataset
+
+def load_image_dataset(data_path, target_image_size, dict_labels, shuffle_data=True):
+    x, labels = [], []
+    image_paths = sorted(list(paths.list_images(data_path)))
+    for image_path in image_paths:
+        img = cv2.imread(image_path)
+        img = cv2.resize(img, target_image_size)
+        x.append(img)
+        label = image_path.split(os.path.sep)[-2]
+        labels.append(dict_labels[label])
+    if shuffle_data:
+        x, labels = shuffle(x, labels, random_state=42)
+    input_shape = (target_image_size[0], target_image_size[1], 3)
+    return x, labels, input_shape
+
+# Memuat Dataset
+x_train, y_train, input_shape = load_image_dataset(training_path, target_image_size, cat_breed_labels)
+x_val, y_val, _ = load_image_dataset(validate_path, target_image_size, cat_breed_labels)
+x_test, y_test, _ = load_image_dataset(test_path, target_image_size, cat_breed_labels, shuffle_data=False)
+
+# Data Generator
+
+def data_preparation(training_path, validate_path, test_path, target_image_size):
+    datagen_args = dict(
+        preprocessing_function=tf.keras.applications.resnet50.preprocess_input,
+        fill_mode='nearest',
+        horizontal_flip=True,
+        rotation_range=15,
+        zoom_range=0.1,
+        width_shift_range=0.1,
+        height_shift_range=0.1
+    )
+    train_datagen = ImageDataGenerator(**datagen_args)
+    val_datagen = ImageDataGenerator(preprocessing_function=tf.keras.applications.resnet50.preprocess_input)
+    test_datagen = ImageDataGenerator(preprocessing_function=tf.keras.applications.resnet50.preprocess_input)
+
+    class_list = list(cat_breed_labels.keys())
+
+    train_gen = train_datagen.flow_from_directory(training_path, target_size=target_image_size, classes=class_list, class_mode='categorical', batch_size=32)
+    val_gen = val_datagen.flow_from_directory(validate_path, target_size=target_image_size, classes=class_list, class_mode='categorical', batch_size=32)
+    test_gen = test_datagen.flow_from_directory(test_path, target_size=target_image_size, classes=class_list, class_mode='categorical', shuffle=False, batch_size=32)
+
+    return train_gen, val_gen, test_gen
+
+training_generator, validate_generator, test_generator = data_preparation(training_path, validate_path, test_path, target_image_size)
+
+# Model Training
+
+def train_resnet50_model(train_gen, val_gen, input_shape, num_classes=12, epochs=30):
+    base_model = ResNet50(include_top=False, weights='imagenet', input_shape=input_shape)
+    for layer in base_model.layers:
+        layer.trainable = False
+
+    model = Sequential([
+        base_model,
+        GlobalAveragePooling2D(),
+        Dense(256, activation='relu'),
+        Dense(512, activation='relu'),
+        Dropout(0.2),
+        Dense(num_classes, activation='softmax')
+    ])
+
+    model.compile(optimizer=Adam(1e-5), loss='categorical_crossentropy', metrics=['accuracy'])
+
+    early_stop = EarlyStopping(monitor='val_loss', patience=8, restore_best_weights=True)
+    reduce_lr = ReduceLROnPlateau(monitor='val_loss', patience=3, factor=0.5, verbose=1)
+
+    history = model.fit(train_gen, validation_data=val_gen, epochs=epochs, callbacks=[early_stop, reduce_lr])
+
+    return model, history
+
+model, history = train_resnet50_model(training_generator, validate_generator, input_shape)
+
+# Evaluasi Model
+
+def evaluate_model(model, generator, label_map, title_prefix=""):
+    y_true = generator.classes
+    y_pred = np.argmax(model.predict(generator), axis=1)
+    report = classification_report(y_true, y_pred, target_names=label_map)
+    matrix = confusion_matrix(y_true, y_pred)
+
+    print(f"{title_prefix} Classification Report:\n", report)
+
+    plt.figure(figsize=(10, 8))
+    plt.imshow(matrix, interpolation='nearest', cmap=plt.cm.Oranges)
+    plt.title(f"{title_prefix} Confusion Matrix")
+    tick_marks = np.arange(len(label_map))
+    plt.xticks(tick_marks, label_map, rotation=45)
+    plt.yticks(tick_marks, label_map)
+    fmt = 'd'
+    thresh = matrix.max() / 2.
+    for i, j in itertools.product(range(matrix.shape[0]), range(matrix.shape[1])):
+        plt.text(j, i, format(matrix[i, j], fmt), horizontalalignment="center",
+                 color="white" if matrix[i, j] > thresh else "black")
+    plt.ylabel('True label')
+    plt.xlabel('Predicted label')
+    plt.tight_layout()
+    plt.show()
+
+    return report, matrix
+
+final_report, final_conf_matrix = evaluate_model(model, test_generator, list(cat_breed_labels.keys()), title_prefix="Final")
+
+
+# Plot Accuracy & Loss
+
+def plot_training_history(history):
+    plt.figure(figsize=(12, 5))
+    plt.subplot(1, 2, 1)
+    plt.plot(history.history['accuracy'], label='Train Accuracy')
+    plt.plot(history.history['val_accuracy'], label='Val Accuracy')
+    plt.title('Model Accuracy')
+    plt.xlabel('Epoch')
+    plt.ylabel('Accuracy')
+    plt.legend()
+
+    plt.subplot(1, 2, 2)
+    plt.plot(history.history['loss'], label='Train Loss')
+    plt.plot(history.history['val_loss'], label='Val Loss')
+    plt.title('Model Loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+plot_training_history(history)
+
+# Save Model
+model.save("D:/Skripsi - Tugas Akhir/Skripsi-Coding/model_resnet50_catbreed.h5")
+print("Model klasifikasi ras kucing berhasil disimpan.")
